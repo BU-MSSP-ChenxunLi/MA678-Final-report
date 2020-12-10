@@ -1,0 +1,387 @@
+---
+title: "MA678-Final Project"
+author: "ChenxunLi"
+date: "11/23/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(scales)
+library(lme4)
+library(kableExtra)
+library(ROCR)
+```
+
+## Abstract
+This paper explored the relevant data of Resort Hotel and City Hotel from 2015 to 2019, established a Multilevel logistic model to study the influencing factors of the cancellation rate with a prediction accuracy of 78% and AUC of 0.86.
+
+
+## Introduction
+
+### Background
+The data set contains the information about 119k booking records for a city hotel and a resort hotel. I will use this data set to predict the cancellation rate in Multilevel logistic model.
+
+### Main variables Introduction
+
+'is_canceled': represent whether the booking was canceled; 0 represents 'not canceled', 1 represents 'canceled'
+
+'hotel': 'Resort Hotel' and 'City Hotel'
+
+'lead_time': Number of days booked in advance (the arrival date - the booking date)
+
+'adr': average Daily Rate (the sum of all lodging transactions / the total number of staying nights)
+
+'adults': numbers of adults
+
+'children': numbers of children
+
+'babies': numbers of babies
+
+'is_repeated_guest': represent whether the guest booked the this hotel before (1) or not(0)
+
+'previous_cancellations': number of previous bookings cancelled by the guest before the current booking
+
+'previous_bookings_not_canceled': number of previous bookings not cancelled by the guest before the current booking
+
+'market_segment': In detail, “TA” means “Travel Agents” and “TO” means “Tour Operators”
+
+'arrival_date_month': month of arrival date
+
+'meal': type of meal booked
+
+'country': country of origin.
+
+'reserved_room_type': room type when guest reserved
+
+'deposit_type': the type that customer made a deposit to guarantee the booking
+
+'customer_type': type of booking divided in to three categories
+
+### Data Processing
+
+At first, I need to process the data because there are many NA and outliers in the data set. For example, there are ‘undefined' in 'meal' variable, and 'undefined' and 'SC' all represent no meal, so I modify the "Undefined" to "SC". Besides, in 'adults','children' and 'babies', there are some outliers like 20 adults, 30 children, I remove these value. 
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+hotel_bookings <- read_csv("hotel_bookings.csv")
+```
+
+
+```{r,echo=FALSE}
+hotel_bookings$meal[hotel_bookings$meal=='Undefined'] <- 'SC'
+hotel_bookings <- filter(hotel_bookings,adults<=4)
+hotel_bookings$children[is.na(hotel_bookings$children)] <- 0
+hotel_bookings <- filter(hotel_bookings,children<=3)
+hotel_bookings <- filter(hotel_bookings,babies<=3)
+hotel_bookings <- filter(hotel_bookings,market_segment!="Undefined")
+hotel_bookings <- filter(hotel_bookings,adr>0)
+
+```
+
+### EDA
+
+1.Which hotel have higher cancelations?
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE,fig.height=4,fig.width=8}
+hotel_cancel <- hotel_bookings %>% group_by(hotel,is_canceled) %>%
+  srvyr::summarize(
+    numbers=n()
+  )
+
+for(i in 1:4){
+  if(hotel_cancel$hotel[i]=="City Hotel"){
+  hotel_cancel$percent[i] <- percent(hotel_cancel$numbers[i]/(45147+32971),0.01)
+}
+if(hotel_cancel$hotel[i]=="Resort Hotel"){
+  hotel_cancel$percent[i] <- percent(hotel_cancel$numbers[i]/(28270+11037),0.01)
+}
+}
+
+
+ggplot(hotel_cancel, aes(x=hotel,y=numbers,fill=factor(is_canceled)))+
+  geom_bar(stat = "identity",position = "dodge")+
+  geom_text(aes(label=percent,y=numbers+10),vjust=-0.3,position = position_dodge(.9),size=4,color="black")+
+  ggtitle("Cancelations Proportions of each hotel ")+xlab("Hotel")+ylab("Count")+
+  labs(fill="Cancel Status")+
+  scale_fill_discrete(breaks = c("0", "1"),
+    labels = c("Not Cancelled", "Cancelled"))+
+  theme(plot.title = element_text(hjust = 0.5, size = 12))
+  
+```
+
+From the bar plot, we can obviously find that city hotel have a higher cancellation rate than the resort hotel.
+
+2. Which month have the highest number of cancelations?
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE,fig.height=4,fig.width=8}
+month_cancel <- hotel_bookings %>% group_by(arrival_date_month,is_canceled) %>%
+  srvyr::summarize(
+    numbers=n()
+  )
+
+month_cancel_sum <- hotel_bookings %>% group_by(arrival_date_month) %>%
+  srvyr::summarize(
+    sum_num=n()
+  )
+
+month_final <- month_cancel %>%
+  left_join(month_cancel_sum, by="arrival_date_month")
+
+
+month_final$percent <- percent(month_final$numbers/month_final$sum_num,0.01)
+
+month_final$arrival_date_month <- factor(month_final$arrival_date_month,levels = c(
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December"
+    ))
+
+ggplot(month_final,aes(x=arrival_date_month,y=numbers,fill=factor(is_canceled)))+
+  geom_bar(stat = "identity")+
+  geom_text(aes(label=percent),position = position_stack(.5),size=4,color="black")+
+  coord_flip()+
+  ggtitle("Cancelations Proportions of each month")+
+  xlab("Month")+ylab("Count")+
+  labs(fill="Cancel Status")+
+  scale_fill_discrete(breaks = c("0", "1"),
+    labels = c("Not Cancelled", "Cancelled"))+
+  theme(plot.title = element_text(hjust = 0.5, size = 12))
+
+
+```
+
+From the plot, we can find that the most number of booking is in August, and the booking is most possibly canceled when the arrive date is in June.
+
+## Method
+
+### Choose the method
+I would like to study the factors of cancellation, so my dependent variable is 'is_canceled'. 'is_canceled' is a binomial variable that 1 represents 'canceled' and 0 represents 'not canceled', so my first model is logistic model. However, after the check of the model, I thought the accuracy of prediction is so low and I found that many of the independent variables are structured by group. So, I choose multilevel logistic model at last.
+
+After many attempts, I use this formula for model:
+
+```{r,echo=FALSE}
+log_data <- hotel_bookings %>% dplyr::select(is_canceled,country,lead_time,hotel,adr,
+                                        arrival_date_month,meal,adults,children,babies,market_segment,
+                                        is_repeated_guest,previous_cancellations,previous_bookings_not_canceled,
+                                        reserved_room_type,deposit_type,customer_type)
+```
+
+```{r,warning=FALSE}
+multilevel_logistic <- glmer(data=log_data,is_canceled~lead_time+adr+
+ adults+children+babies+is_repeated_guest+previous_cancellations+
+ previous_bookings_not_canceled+(1|hotel)+(1|market_segment)+
+ (1|arrival_date_month)+(1|meal)+(1|country)+(1|reserved_room_type)+
+ (1|deposit_type)+(1|customer_type), family = binomial)
+```
+
+
+### What is Multilevel logistc Model
+
+Multilevel logistic Model is a Multilevel Model applies to logistic regression and  its coefficients are grouped into batches and a probability distribution is assigned to each batch.
+
+
+## Result
+
+1.Fixed variable Interpreting
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+fixed_info <- as.data.frame(broom.mixed::tidy(multilevel_logistic,effects="fixed"))
+fixed_info%>%
+  kbl()%>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  footnote(general = "The table above is the fixed effect of the Multilevel logistc Model.",
+           general_title = "Table 1: ")
+```
+
+From the fixed variable:
+
+First of all, the each variable's p-value is so small except intercept, so the outcome is significant mostly.
+
+Beside,I find that the effect of 'previous_cancellations' seem to be most important(2.23 increase with each increase of 1)
+
+I also find that the effect of 'is_repeated_guest' seem to be important, that means if a guest is a repeated guest(is_repeated_guest=1), he/she will have 0.95 less than a 'not repeated guest'(is_repeated_guest=0).
+
+'Babies' seems to be significant as well (0.75 decrease with each increase of 1), same with the 'previous_bookings_not_canceled'(0.5 decrease with each increase of 1)
+
+
+2.Ramdom effects
+
+```{r,echo=FALSE}
+Groups <- c("country","arrival_date_month","reserved_room_type ","market_segment","customer_type","meal","deposit_type","hotel")
+
+Name <- c("(Intercept)","(Intercept)","(Intercept)","(Intercept)","(Intercept)","(Intercept)","(Intercept)","(Intercept)")
+
+Variance <- c(0.874098,0.017313,0.009538,0.332734,0.254195,0.061044 ,5.125269,0.086402 )
+Std.Dev. <- c(0.93493,0.13158 ,0.09766 ,0.57683 ,0.50418,0.24707,2.26391, 0.29394)
+
+random_info <- as.data.frame(cbind(Groups,Name,Variance,Std.Dev.))
+random_info %>%
+  kbl()%>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  footnote(general = "The table above is the random effect of Multilevel logistc Model.",
+           general_title = "Table 2: ")
+```
+From the random effect, we can obviously find that the variance of 'deposit_type' is biggest, and that means the different type of deposit influence whether cancel or not most than other groups.
+
+Besides, we can also find that the variance of 'reserved_room_type' is smallest, that means the reserved room type nearly has no effect on the cancellation.
+
+So we check that by viewing the coefficient of 'deposit_type' and 'reserved_room_type'.
+
+```{r,echo=FALSE}
+coef_dep <- as.data.frame(coef(multilevel_logistic)$deposit_type)[1:6]
+coef_dep %>%
+  kbl()%>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  footnote(general = "The table above is the part coefficient of each level in group 'deposit_type'.",
+           general_title = "Table 3: ")
+```
+
+From the table, we can find that the intercept varies big, the intercept of 'Non Refund' is biggest and the intercept of 'No Deposit' is smallest.
+
+Besides, we can see that the coefficient of fixed variable is the same.
+
+
+```{r,echo=FALSE}
+coef_dep <- as.data.frame(coef(multilevel_logistic)$reserved_room_type)[1:6]
+coef_dep %>%
+  kbl()%>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  footnote(general = "The table above is the part coefficient of each level in group 'reserved_room_type'.",
+           general_title = "Table 4: ")
+```
+
+From this table, we can see few difference between each room type, so reserved_room_type has few effects on cancellation.
+
+Besides, we can see that the coefficient of fixed variable is the same.
+
+## Discussion
+
+### Check the model
+
+1.Residual Plot
+
+```{r,echo=FALSE,fig.height=2,fig.width=4,fig.align='center'}
+plot(multilevel_logistic,ylab="Residuals",xlab="Predicted values",main="Residuals and Fitted",cex.main=0.1)
+
+```
+
+
+From the plot, we can see that the residuals are all nearly zero except fitted = 1, so the model still need to be modified.
+
+2.The accuracy of prediction
+
+Beside, I also want to know whether this model can predict the cancellation, so I use 'predict()' and check the accuracy among these 119k rows. And the out come is below
+
+```{r,echo=FALSE}
+log_data$pred <- predict(multilevel_logistic,log_data,type="response")
+log_data$pred_canceled <- ifelse(log_data$pred>=0.5,1,0)
+accuracy <- percent(mean(log_data$is_canceled==log_data$pred_canceled),accuracy = 0.01)
+print(paste("The accuracy of prediction is ",accuracy))
+
+```
+
+3.ROC curve and AUC
+
+A receiver operating characteristic curve, or ROC curve, is a graphical plot that illustrates the diagnostic ability of a binary classifier system as its discrimination threshold is varied. 
+
+AUC (Area Under Curve) is defined as the area bounded by the coordinate axis under the ROC Curve. Obviously, the value of this Area will not be greater than 1. Since ROC curve is generally above the line y=x, AUC value ranges between 0.5 and 1. The closer the AUC is to 1.0, the higher the authenticity of the detection method is. When it is equal to 0.5, it has the lowest authenticity and no application value.
+
+And I will plot the ROC curve and compute the AUC.
+
+```{r,echo=FALSE,fig.height=2,fig.width=4,fig.align='center'}
+prob <- predict(multilevel_logistic, newdata=log_data, type="response")
+pred <- prediction(prob, log_data$is_canceled)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+
+auc <- performance(pred, measure = "auc")
+auc <- round(auc@y.values[[1]],2)
+
+roc.data <- data.frame(fpr=unlist(perf@x.values),
+                       tpr=unlist(perf@y.values),
+                       model="GLM")
+ggplot(roc.data, aes(x=fpr, ymin=0, ymax=tpr)) +
+    geom_ribbon(alpha=0.23,fill="skyblue") +
+    geom_line(aes(y=tpr)) + 
+    ggtitle(paste0("ROC Curve & AUC=", auc))
+
+```
+
+The AUC is 0.86, and plus the accuracy is 78.26%, so this model can basically be a binary classifier to predict cancellation.
+
+\newpage
+
+## Appendix
+
+### Classical logistic regression VS Multilevel logistc Model
+
+1.Result comparason
+```{r,warning=FALSE,message=FALSE}
+model_glm <- glm(data=log_data,is_canceled~lead_time+adr+adults+
+  children+babies+is_repeated_guest+previous_cancellations+
+    previous_bookings_not_canceled, family = binomial)
+summary(model_glm)
+```
+According to the classic logistic model, the 'children' and 'babies' are not significant.
+
+
+2.Predictions comparison
+```{r}
+log_data$pred <- predict(model_glm,log_data,type="response")
+log_data$pred_canceled <- ifelse(log_data$pred>=0.5,1,0)
+accuracy <- percent(mean(log_data$is_canceled==log_data$pred_canceled),accuracy = 0.01)
+print(paste("The accuracy of prediction is ",accuracy))
+
+```
+Classic logistic model can only have the accuracy of 68.6%, which is 9.4% lower than multilevel logistic model
+
+3. AUC comparison
+
+```{r,echo=FALSE}
+prob <- predict(model_glm, newdata=log_data, type="response")
+pred <- prediction(prob, log_data$is_canceled)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+
+auc <- performance(pred, measure = "auc")
+auc <- auc@y.values[[1]]
+
+roc.data <- data.frame(fpr=unlist(perf@x.values),
+                       tpr=unlist(perf@y.values),
+                       model="GLM")
+ggplot(roc.data, aes(x=fpr, ymin=0, ymax=tpr)) +
+    geom_ribbon(alpha=0.2) +
+    geom_line(aes(y=tpr)) + 
+    ggtitle(paste0("ROC Curve w/ AUC=", auc))
+```
+The AUC is 0.71, which is 0.15 lower than the multilevel logistic model.
+
+4.AIC and BIC
+
+```{r}
+model <- c("multilevel logistic model","classic logistic model")
+AIC <- c(AIC(multilevel_logistic),AIC(model_glm))
+BIC <- c(BIC(multilevel_logistic),BIC(model_glm))
+data_frame(model,AIC,BIC)
+```
+We can see that multilevel_logistic has lower AIC and BIC.
+
+### Reference
+
+1.kaggle notebooks
+
+2.WikiPedia
+
+3.R Documentation
+
